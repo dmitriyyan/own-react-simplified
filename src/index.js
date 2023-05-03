@@ -20,16 +20,36 @@ function createTextElement(text) {
   };
 }
 
+function render(element, container) {
+  const dom =
+    element.type == "TEXT_ELEMENT"
+      ? document.createTextNode("")
+      : document.createElement(element.type);
+
+  const isProperty = (key) => key !== "children";
+  Object.keys(element.props)
+    .filter(isProperty)
+    .forEach((name) => {
+      dom[name] = element.props[name];
+    });
+
+  element.props.children.forEach((child) => render(child, dom));
+
+  container.appendChild(dom);
+}
+
 const SimpleReact = {
   createElement,
+  render,
 };
 
 /** @jsx SimpleReact.createElement */
 const element = (
-  <div id="foo">
-    <a>bar</a>
-    <b />
+  <div style="background: salmon">
+    <h1>Hello World</h1>
+    <h2 style="text-align:right">from SimpleReact</h2>
   </div>
 );
 
-console.log(element);
+const container = document.getElementById("root");
+SimpleReact.render(element, container);
