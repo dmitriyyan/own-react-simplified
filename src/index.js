@@ -22,16 +22,11 @@ function createTextElement(text) {
 
 function createDom(fiber) {
   const dom =
-    fiber.type == "TEXT_ELEMENT"
+    fiber.type === "TEXT_ELEMENT"
       ? document.createTextNode("")
       : document.createElement(fiber.type);
 
-  const isProperty = (key) => key !== "children";
-  Object.keys(fiber.props)
-    .filter(isProperty)
-    .forEach((name) => {
-      dom[name] = fiber.props[name];
-    });
+  updateDom(dom, {}, fiber.props);
 
   return dom;
 }
@@ -47,7 +42,7 @@ const isNew = (prev, next) => (key) => prev[key] !== next[key];
 const isGone = (prev, next) => (key) => !(key in next);
 
 function updateDom(dom, prevProps, nextProps) {
-  //Remove old or changed event listeners
+  // Remove old or changed event listeners
   Object.keys(prevProps)
     .filter(isEvent)
     .filter((key) => !(key in nextProps) || isNew(prevProps, nextProps)(key))
@@ -64,6 +59,14 @@ function updateDom(dom, prevProps, nextProps) {
       dom[name] = "";
     });
 
+  // Set new or changed properties
+  Object.keys(nextProps)
+    .filter(isProperty)
+    .filter(isNew(prevProps, nextProps))
+    .forEach((name) => {
+      dom[name] = nextProps[name];
+    });
+
   // Add event listeners
   Object.keys(nextProps)
     .filter(isEvent)
@@ -72,30 +75,35 @@ function updateDom(dom, prevProps, nextProps) {
       const eventType = name.toLowerCase().substring(2);
       dom.addEventListener(eventType, nextProps[name]);
     });
+}
 
-  // Set new or changed properties
-  Object.keys(nextProps)
-    .filter(isProperty)
-    .filter(isNew(prevProps, nextProps))
-    .forEach((name) => {
-      dom[name] = nextProps[name];
-    });
+function commitDeletion(fiber, domParent) {
+  if (fiber.dom) {
+    domParent.removeChild(fiber.dom);
+  } else {
+    commitDeletion(fiber.child, domParent);
+  }
 }
 
 function commitWork(fiber) {
   if (!fiber) {
     return;
   }
-  const domParent = fiber.parent.dom;
-  if (fiber.effectTag === "PLACEMENT" && fiber.dom !== null) {
+
+  let domParentFiber = fiber.parent;
+  while (!domParentFiber.dom) {
+    domParentFiber = domParentFiber.parent;
+  }
+  const domParent = domParentFiber.dom;
+
+  if (fiber.effectTag === "PLACEMENT" && fiber.dom) {
     domParent.appendChild(fiber.dom);
-  } else if (fiber.effectTag === "UPDATE" && fiber.dom != null) {
+  } else if (fiber.effectTag === "UPDATE" && fiber.dom) {
     updateDom(fiber.dom, fiber.alternate.props, fiber.props);
   } else if (fiber.effectTag === "DELETION") {
-    domParent.removeChild(fiber.dom);
+    commitDeletion(fiber, domParent);
   }
 
-  domParent.appendChild(fiber.dom);
   commitWork(fiber.child);
   commitWork(fiber.sibling);
 }
@@ -119,21 +127,14 @@ function render(element, container) {
   nextUnitOfWork = workInProgressRoot;
 }
 
-function reconcileChildren(workInProgressFiber, elements) {
+function reconcileChildren(fiber, elements) {
   let index = 0;
   let prevSibling = null;
-  let oldFiber =
-    workInProgressFiber.alternate && workInProgressFiber.alternate.child;
+  let oldFiber = fiber.alternate && fiber.alternate.child;
 
-  while (index < elements.length || oldFiber != null) {
+  while (index < elements.length || oldFiber) {
     const element = elements[index];
-
-    let newFiber = {
-      type: element.type,
-      props: element.props,
-      parent: workInProgressFiber,
-      dom: null,
-    };
+    let newFiber = null;
 
     const sameType = oldFiber && element && element.type == oldFiber.type;
 
@@ -142,7 +143,7 @@ function reconcileChildren(workInProgressFiber, elements) {
         type: oldFiber.type,
         props: element.props,
         dom: oldFiber.dom,
-        parent: workInProgressFiber,
+        parent: fiber,
         alternate: oldFiber,
         effectTag: "UPDATE",
       };
@@ -152,19 +153,24 @@ function reconcileChildren(workInProgressFiber, elements) {
         type: element.type,
         props: element.props,
         dom: null,
-        parent: workInProgressFiber,
+        parent: fiber,
         alternate: null,
         effectTag: "PLACEMENT",
       };
     }
+
     if (oldFiber && !sameType) {
       oldFiber.effectTag = "DELETION";
       deletions.push(oldFiber);
     }
 
+    if (oldFiber) {
+      oldFiber = oldFiber.sibling;
+    }
+
     if (index === 0) {
-      workInProgressFiber.child = newFiber;
-    } else {
+      fiber.child = newFiber;
+    } else if (element) {
       prevSibling.sibling = newFiber;
     }
 
@@ -173,13 +179,62 @@ function reconcileChildren(workInProgressFiber, elements) {
   }
 }
 
-function performUnitOfWork(fiber) {
+let workInProgressFiber = null;
+let hookIndex = null;
+
+function updateFunctionComponent(fiber) {
+  workInProgressFiber = fiber;
+  hookIndex = 0;
+  workInProgressFiber.hooks = [];
+  const children = [fiber.type(fiber.props)];
+  reconcileChildren(fiber, children);
+}
+
+function useState(initial) {
+  const oldHook =
+    workInProgressFiber.alternate &&
+    workInProgressFiber.alternate.hooks &&
+    workInProgressFiber.alternate.hooks[hookIndex];
+  const hook = {
+    state: oldHook ? oldHook.state : initial,
+    queue: [],
+  };
+
+  const actions = oldHook ? oldHook.queue : [];
+  actions.forEach((action) => {
+    hook.state = action(hook.state);
+  });
+
+  const setState = (action) => {
+    hook.queue.push(action);
+    workInProgressRoot = {
+      dom: currentRoot.dom,
+      props: currentRoot.props,
+      alternate: currentRoot,
+    };
+    nextUnitOfWork = workInProgressRoot;
+    deletions = [];
+  };
+
+  workInProgressFiber.hooks.push(hook);
+  hookIndex++;
+  return [hook.state, setState];
+}
+
+function updateHostComponent(fiber) {
   if (!fiber.dom) {
     fiber.dom = createDom(fiber);
   }
+  reconcileChildren(fiber, fiber.props.children);
+}
 
-  const elements = fiber.props.children;
-  reconcileChildren(fiber, elements);
+function performUnitOfWork(fiber) {
+  const isFunctionComponent = fiber.type instanceof Function;
+  if (isFunctionComponent) {
+    updateFunctionComponent(fiber);
+  } else {
+    updateHostComponent(fiber);
+  }
 
   if (fiber.child) {
     return fiber.child;
@@ -212,15 +267,24 @@ requestIdleCallback(workLoop);
 const SimpleReact = {
   createElement,
   render,
+  useState,
 };
 
 /** @jsx SimpleReact.createElement */
-const element = (
-  <div style="background: salmon">
-    <h1>Hello World</h1>
-    <h2 style="text-align:right">from SimpleReact</h2>
-  </div>
-);
-
+function App() {
+  const [state, setState] = SimpleReact.useState(1);
+  return (
+    <div>
+      <h1>Count: {state}</h1>
+      <button
+        onClick={() => setState((c) => c + 1)}
+        style={{ userSelect: "none" }}
+      >
+        +
+      </button>
+    </div>
+  );
+}
+const element = <App />;
 const container = document.getElementById("root");
 SimpleReact.render(element, container);
